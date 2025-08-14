@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Ninja Stealth — SAFE PLAYABLE</title>
+<style>
+  html,body{margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  #c{display:block;margin:0 auto;touch-action:none;background:#000}
+  .hint{position:fixed;left:8px;bottom:6px;font-size:13px;color:#ddd}
+</style>
+</head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<div class="hint">Кнопки: ◀ ▶ ⤒ Действие — жми по белым кругам</div>
+<script>
+/* 100% автономная версия. Яркая графика, наглядные кнопки, реагирующие на касания.
+   Работает в Safari iPhone/Android/ПК. */
+(function(){
+  const W=800,H=600,G=1600; // гравитация
+  const canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
+  // Снизим масштаб, чтобы на телефоне всё помещалось (fit-contain)
+  function fit(){
+    const r=Math.min(window.innerWidth/W, window.innerHeight/H);
+    canvas.style.width=(W*r)+'px'; canvas.style.height=(H*r)+'px';
+  }
+  window.addEventListener('resize',fit); fit();
+
+  // Мир
+  const platforms=[
+    {x:0,y:580,w:800,h:20,color:'#5b3a1a'},
+    {x:240,y:480,w:240,h:16,color:'#5b3a1a'},
+    {x:560,y:410,w:240,h:16,color:'#5b3a1a'},
+    {x:120,y:360,w:180,h:16,color:'#5b3a1a'}
+  ];
+  const torch={x:400,y:520,r:190,alive:true};
+
+  // Игрок и враги
+  const player={x:120,y:450,vx:0,vy:0,w:28,h:36,face:1,speed:180,jump:-380,onGround:false};
+  const enemies=[
+    {x:640,y:450,vx:0,vy:0,w:30,h:38,dir:-1,min:520,max:740,speed:48,vision:160,alive:true},
+    {x:260,y:450,vx:0,vy:0,w:30,h:38,dir:-1,min:220,max:380,speed:48,vision:150,alive:true},
+  ];
+
+  // Ввод
+  const keys={left:false,right:false,up:false,act:false};
+  addEventListener('keydown',e=>{ if(e.key==='ArrowLeft')keys.left=true;
+    if(e.key==='ArrowRight')keys.right=true; if(e.key==='ArrowUp')keys.up=true;
+    if(e.code==='Space')keys.act=true; });
+  addEventListener('keyup',e=>{ if(e.key==='ArrowLeft')keys.left=false;
+    if(e.key==='ArrowRight')keys.right=false; if(e.key==='ArrowUp')keys.up=false;
+    if(e.code==='Space')keys.act=false; });
+
+  // Кнопки на экране (видимые, яркие)
+  const touch={left:false,right:false,up:false,act:false};
+  const btns=[
+    {cx:90, cy:520, r:50, key:'left', label:'◀'},
+    {cx:180,cy:520, r:50, key:'right',label:'▶'},
+    {cx:720,cy:520, r:50, key:'up',   label:'⤒'},
+    {cx:630,cy:520, r:50, key:'act',  label:'⚔'}
+  ];
+  function mapPoint(ev){
+    const rect=canvas.getBoundingClientRect(); const t=ev.changedTouches?ev.changedTouches[0]:ev;
+    const x=(t.clientX-rect.left)*canvas.width/rect.width;
+    const y=(t.clientY-rect.top)*canvas.height/rect.height;
+    return {x,y};
+  }
+  function handleDown(ev){ const p=mapPoint(ev);
+    btns.forEach(b=>{ if((p.x-b.cx)**2+(p.y-b.cy)**2<=b.r**2){ touch[b.key]=true; } });
+    ev.preventDefault();
+  }
+  function handleUp(ev){ touch.left=touch.right=touch.up=touch.act=false; }
+  canvas.addEventListener('touchstart',handleDown,{passive:false});
+  canvas.addEventListener('touchend',handleUp);
+  canvas.addEventListener('touchcancel',handleUp);
+  canvas.addEventListener('mousedown',handleDown);
+  addEventListener('mouseup',handleUp);
+
+  // Вспомогательные
+  function collideBody(b){
+    b.onGround=false;
+    platforms.forEach(p=>{
+      const left=b.x-b.w/2, right=b.x+b.w/2, top=b.y-b.h/2, bottom=b.y+b.h/2;
+      const pleft=p.x, pright=p.x+p.w, ptop=p.y, pbot=p.y+p.h;
+      const ox=Math.min(right,pright)-Math.max(left,pleft);
+      const oy=Math.min(bottom,pbot)-Math.max(top,ptop);
+      if(ox>0&&oy>0){
+        if(oy<ox){
+          if(b.vy>0){ b.y-=oy; b.vy=0; b.onGround=true; }
+          else if(b.vy<0){ b.y+=oy; b.vy=0; }
+        }else{
+          if(b.vx>0){ b.x-=ox; b.vx=0; } else if(b.vx<0){ b.x+=ox; b.vx=0; }
+        }
+      }
+    });
+    if(b.x<b.w/2){ b.x=b.w/2; b.vx=0; }
+    if(b.x>W-b.w/2){ b.x=W-b.w/2; b.vx=0; }
+    if(b.y>H-b.h/2){ b.y=H-b.h/2; b.vy=0; b.onGround=true; }
+  }
+
+  let alert=0; // 0..100
+
+  // Игровой цикл
+  let last=performance.now()/1000;
+  function loop(){
+    const t=performance.now()/1000, dt=Math.min(0.033,t-last); last=t;
+
+    // Управление
+    const left = keys.left || touch.left;
+    const right= keys.right|| touch.right;
+    const up   = keys.up   || touch.up;
+    const act  = keys.act  || touch.act;
+
+    player.vx = (right?1:0 - (left?1:0))*player.speed;
+    if(player.vx) player.face = player.vx>0?1:-1;
+    player.vy += G*dt;
+    if(up && player.onGround) player.vy = player.jump;
+
+    player.x += player.vx*dt; player.y += player.vy*dt;
+    collideBody(player);
+
+    // Враги
+    let visible=false;
+    enemies.forEach(e=>{
+      if(!e.alive) return;
+      e.vx = e.speed*e.dir; e.vy += G*dt;
+      e.x += e.vx*dt; e.y += e.vy*dt; collideBody(e);
+      if(e.x<e.min) e.dir=1; if(e.x>e.max) e.dir=-1;
+
+      const inFront=(e.dir===1 && player.x>=e.x)||(e.dir===-1 && player.x<=e.x);
+      const dist=Math.hypot(player.x-e.x, player.y-e.y);
+      const lit=torch.alive && Math.hypot(player.x-torch.x, player.y-torch.y)<torch.r;
+      if(inFront && dist<e.vision && lit) visible=true;
+
+      const close=Math.abs(player.x-e.x)<(player.w+e.w)/2 && Math.abs(player.y-e.y)<(player.h+e.h)/2;
+      const behind=(e.dir===1 && player.x<e.x)||(e.dir===-1 && player.x>e.x);
+      if(close){ if(act && behind){ e.alive=false; } else { alert=Math.min(100, alert+55*dt); } }
+    });
+
+    // Взаимодействие с факелом
+    if(Math.hypot(player.x-torch.x, player.y-torch.y)<52 && act) torch.alive=false;
+
+    // Заметность
+    alert = visible ? Math.min(100, alert+25*dt) : Math.max(0, alert-22*dt);
+    if(alert>=100){ // рестарт
+      player.x=120; player.y=450; player.vx=player.vy=0; alert=0; torch.alive=true;
+      enemies[0].alive=true; enemies[0].x=640; enemies[0].y=450; enemies[0].dir=-1;
+      enemies[1].alive=true; enemies[1].x=260; enemies[1].y=450; enemies[1].dir=-1;
+    }
+
+    // РИСОВАНИЕ
+    ctx.clearRect(0,0,W,H);
+
+    // фон-кладка (ярче чем раньше)
+    for(let y=0;y<H;y+=2){ const c=30+Math.floor(40*Math.sin(y/70)); ctx.fillStyle=`rgb(${c},${c},${c+30})`; ctx.fillRect(0,y,W,2); }
+    ctx.strokeStyle='rgba(34,34,34,0.7)';
+    ctx.beginPath(); for(let y=60;y<H;y+=60){ ctx.moveTo(0,y); ctx.lineTo(W,y);} ctx.stroke();
+    ctx.beginPath(); for(let y=60;y<H;y+=60){ for(let x=(y/60)%2?30:0;x<W;x+=60){ ctx.moveTo(x,y-60); ctx.lineTo(x,y);} } ctx.stroke();
+
+    // платформы
+    platforms.forEach(p=>{ ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y,p.w,p.h); });
+
+    // факел
+    ctx.save(); ctx.translate(torch.x,torch.y);
+    ctx.fillStyle='#6a3a1a'; ctx.fillRect(-6,-24,12,60);
+    ctx.beginPath(); ctx.arc(0,-34,12,0,Math.PI*2); ctx.fillStyle=torch.alive?'#ffaa00':'#555'; ctx.fill(); ctx.restore();
+
+    // враги
+    enemies.forEach(e=>{ if(!e.alive) return;
+      ctx.save(); ctx.translate(e.x,e.y);
+      ctx.fillStyle='#d0d0e0'; ctx.fillRect(-e.w/2,-e.h/2,e.w,e.h);
+      ctx.fillStyle='#223'; ctx.fillRect(-10,-4,20,7);
+      ctx.fillStyle='#88f'; ctx.fillRect(-9,-e.h/2-7,18,6);
+      ctx.restore();
+    });
+
+    // игрок — контрастный
+    ctx.save(); ctx.translate(player.x,player.y);
+    ctx.fillStyle='#11dd11'; ctx.fillRect(-player.w/2,-player.h/2,player.w,player.h);
+    ctx.fillStyle='#072'; ctx.fillRect(-player.w/2,-player.h/2,player.w,6);
+    ctx.restore();
+
+    // затемнение и свет
+    ctx.fillStyle='rgba(0,0,0,0.82)'; ctx.fillRect(0,0,W,H);
+    ctx.globalCompositeOperation='destination-out';
+    if(torch.alive){
+      const g=ctx.createRadialGradient(torch.x,torch.y-22,0, torch.x,torch.y-22, torch.r);
+      g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(0.6,'rgba(255,255,255,0.55)'); g.addColorStop(1,'rgba(255,255,255,0)');
+      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(torch.x,torch.y-22,torch.r,0,Math.PI*2); ctx.fill();
+    }
+    const g2=ctx.createRadialGradient(player.x,player.y-10,0, player.x,player.y-10, 64);
+    g2.addColorStop(0,'rgba(255,255,255,0.6)'); g2.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle=g2; ctx.beginPath(); ctx.arc(player.x,player.y-10,64,0,Math.PI*2); ctx.fill();
+    ctx.globalCompositeOperation='source-over';
+
+    // HUD
+    ctx.fillStyle='#222'; ctx.fillRect(W/2-205,12,410,18);
+    ctx.fillStyle='#ff3344'; ctx.fillRect(W/2-200,15,4*alert,12);
+    ctx.fillStyle='#eee'; ctx.font='12px system-ui'; ctx.fillText('Заметность', W/2-200, 46);
+
+    // Кнопки
+    btns.forEach(b=>{
+      const on = touch[b.key];
+      ctx.globalAlpha=on?0.35:0.2; ctx.fillStyle='#fff';
+      ctx.beginPath(); ctx.arc(b.cx,b.cy,b.r,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha=1; ctx.strokeStyle='#ddd'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(b.cx,b.cy,b.r,0,Math.PI*2); ctx.stroke();
+      ctx.fillStyle='#111'; ctx.font='24px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(b.label,b.cx,b.cy+1);
+    });
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
