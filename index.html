@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Ninja Stealth — No-CDN Build</title>
+<style>
+  html,body{margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  #c{display:block;margin:0 auto;touch-action:none}
+  .hint{position:fixed;left:8px;bottom:6px;font-size:12px;color:#aaa}
+</style>
+</head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<div class="hint">Управление: стрелки/Space, или круги на экране</div>
+<script>
+(function(){
+  const W=800,H=600, G=1600; // g in px/s^2
+  const canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
+
+  // --- Helpers ---
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const now=()=>performance.now()/1000;
+
+  // --- World ---
+  const platforms=[
+    {x:0,y:580,w:800,h:20,color:'#3b2a1a'},
+    {x:230,y:480,w:240,h:14,color:'#3b2a1a'},
+    {x:540,y:410,w:240,h:14,color:'#3b2a1a'},
+    {x:90,y:360,w:170,h:14,color:'#3b2a1a'}
+  ];
+
+  // Torch (light source)
+  const torch={x:400,y:520,r:180,alive:true};
+
+  // Player
+  const player={x:100,y:450,vx:0,vy:0,w:26,h:34,face:1,speed:170,jump:-360,onGround:false};
+  // Enemies
+  const enemies=[
+    {x:620,y:450,vx:0,vy:0,w:28,h:36,dir:-1,min:520,max:720,speed:45,vision:160,alive:true},
+    {x:260,y:450,vx:0,vy:0,w:28,h:36,dir:-1,min:220,max:380,speed:45,vision:150,alive:true},
+  ];
+
+  // Input
+  const keys={left:false,right:false,up:false,act:false};
+
+  window.addEventListener('keydown',e=>{
+    if(e.key==='ArrowLeft') keys.left=true;
+    if(e.key==='ArrowRight') keys.right=true;
+    if(e.key==='ArrowUp') keys.up=true;
+    if(e.code==='Space') keys.act=true;
+  });
+  window.addEventListener('keyup',e=>{
+    if(e.key==='ArrowLeft') keys.left=false;
+    if(e.key==='ArrowRight') keys.right=false;
+    if(e.key==='ArrowUp') keys.up=false;
+    if(e.code==='Space') keys.act=false;
+  });
+
+  // Touch buttons
+  const touches={left:false,right:false,up:false,act:false};
+  function addBtn(cx,cy,r,assign){
+    function inside(x,y){const dx=x-cx,dy=y-cy;return dx*dx+dy*dy<=r*r;}
+    function down(ev){
+      const t=ev.changedTouches?ev.changedTouches[0]:ev;
+      const rect=canvas.getBoundingClientRect();
+      const x=(t.clientX-rect.left)*canvas.width/rect.width;
+      const y=(t.clientY-rect.top)*canvas.height/rect.height;
+      if(inside(x,y)){ touches[assign]=true; ev.preventDefault(); }
+    }
+    function up(ev){ touches[assign]=false; }
+    canvas.addEventListener('touchstart',down,{passive:false});
+    canvas.addEventListener('touchend',up);
+    canvas.addEventListener('touchcancel',up);
+    // mouse fallback
+    canvas.addEventListener('mousedown',down);
+    window.addEventListener('mouseup',up);
+    return {cx,cy,r,assign};
+  }
+  const btns=[
+    addBtn(80,520,46,'left'),
+    addBtn(160,520,46,'right'),
+    addBtn(720,520,46,'up'),
+    addBtn(640,520,46,'act')
+  ];
+
+  let alert=0; // 0..100
+  function rectsOverlap(a,b){
+    return Math.abs(a.x-b.x) <= (a.w+b.w)/2 && Math.abs(a.y-b.y) <= (a.h+b.h)/2;
+  }
+  function collideBody(b){
+    // simple AABB vs platforms
+    b.onGround=false;
+    platforms.forEach(p=>{
+      // Check vertical collision
+      const left=b.x-b.w/2, right=b.x+b.w/2, top=b.y-b.h/2, bottom=b.y+b.h/2;
+      const pleft=p.x, pright=p.x+p.w, ptop=p.y, pbot=p.y+p.h;
+      const overlapX = Math.min(right,pright) - Math.max(left,pleft);
+      const overlapY = Math.min(bottom,pbot) - Math.max(top,ptop);
+      if (overlapX>0 && overlapY>0){
+        if (overlapY < overlapX){
+          if (b.vy>0){ b.y -= overlapY; b.vy=0; b.onGround=true; }
+          else if (b.vy<0){ b.y += overlapY; b.vy=0; }
+        } else {
+          if (b.vx>0){ b.x -= overlapX; b.vx=0; }
+          else if (b.vx<0){ b.x += overlapX; b.vx=0; }
+        }
+      }
+    });
+    // world bounds
+    if (b.x<b.w/2){ b.x=b.w/2; b.vx=0; }
+    if (b.x>W-b.w/2){ b.x=W-b.w/2; b.vx=0; }
+    if (b.y>H-b.h/2){ b.y=H-b.h/2; b.vy=0; b.onGround=true; }
+  }
+
+  let last=now();
+  function loop(){
+    const t=now(), dt=Math.min(0.033, t-last); last=t;
+
+    // --- Player control ---
+    const left = keys.left || touches.left;
+    const right= keys.right|| touches.right;
+    const up   = keys.up   || touches.up;
+    const act  = keys.act  || touches.act;
+
+    player.vx = (right?1:0 - (left?1:0)) * player.speed;
+    if (player.vx!==0) player.face = player.vx>0?1:-1;
+    player.vy += G*dt;
+    if (up && player.onGround){ player.vy = player.jump; }
+
+    player.x += player.vx*dt;
+    player.y += player.vy*dt;
+    collideBody(player);
+
+    // --- Enemies ---
+    let visible=false;
+    enemies.forEach(e=>{
+      if (!e.alive) return;
+      e.vx = e.speed * e.dir;
+      e.vy += G*dt;
+      e.x += e.vx*dt; e.y += e.vy*dt;
+      collideBody(e);
+      if (e.x<e.min) e.dir=1;
+      if (e.x>e.max) e.dir=-1;
+
+      // detection only if player in front & lit by torch
+      const inFront = (e.dir===1 && player.x>=e.x) || (e.dir===-1 && player.x<=e.x);
+      const dist = Math.hypot(player.x-e.x, player.y-e.y);
+      const lit = torch.alive && Math.hypot(player.x-torch.x, player.y-torch.y) < torch.r;
+      if (inFront && dist<e.vision && lit) visible=true;
+
+      // overlap -> if act & behind -> kill; else alert spike
+      const close = Math.abs(player.x-e.x)<(player.w+e.w)/2 && Math.abs(player.y-e.y)<(player.h+e.h)/2;
+      const behind = (e.dir===1 && player.x<e.x) || (e.dir===-1 && player.x>e.x);
+      if (close){
+        if (act && behind){ e.alive=false; }
+        else { alert = Math.min(100, alert+55*dt); }
+      }
+    });
+
+    // interact torch
+    const nearTorch = Math.hypot(player.x-torch.x, player.y-torch.y)<50;
+    if (nearTorch && act && torch.alive){ torch.alive=false; }
+
+    // alert decay/grow
+    if (visible) alert = Math.min(100, alert+25*dt);
+    else alert = Math.max(0, alert-20*dt);
+
+    // fail -> restart
+    if (alert>=100){
+      // reset simple
+      player.x=100; player.y=450; player.vx=0; player.vy=0; alert=0;
+      enemies.forEach((e,i)=>{ e.alive=true; e.x=i?260:620; e.y=450; e.dir=-1; });
+      torch.alive=true; torch.r=180;
+    }
+
+    // --- DRAW ---
+    ctx.clearRect(0,0,W,H);
+
+    // background bricks
+    for(let y=0;y<H;y+=2){
+      const c=15+Math.floor(25*Math.sin(y/80));
+      ctx.fillStyle=`rgb(${c},${c},${c+20})`;
+      ctx.fillRect(0,y,W,2);
+    }
+    // brick lines
+    ctx.strokeStyle='rgba(34,34,34,0.6)';
+    ctx.beginPath();
+    for(let y=60;y<H;y+=60){ ctx.moveTo(0,y); ctx.lineTo(W,y); }
+    ctx.stroke();
+    ctx.beginPath();
+    for(let y=60;y<H;y+=60){
+      for(let x=(y/60)%2?30:0; x<W; x+=60){ ctx.moveTo(x,y-60); ctx.lineTo(x,y); }
+    }
+    ctx.stroke();
+
+    // platforms
+    platforms.forEach(p=>{ ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y,p.w,p.h); });
+
+    // torch
+    ctx.save();
+    ctx.translate(torch.x, torch.y);
+    ctx.fillStyle='#5a3a1a'; ctx.fillRect(-5,-20,10,60);
+    ctx.beginPath();
+    ctx.arc(0,-30,12,0,Math.PI*2);
+    ctx.fillStyle = torch.alive ? '#ffaa00' : '#444';
+    ctx.fill();
+    ctx.restore();
+
+    // enemies
+    enemies.forEach(e=>{
+      if(!e.alive) return;
+      ctx.save();
+      ctx.translate(e.x,e.y);
+      ctx.fillStyle='#b0b0c0'; ctx.fillRect(-e.w/2,-e.h/2,e.w,e.h);
+      ctx.fillStyle='#8890ff'; ctx.fillRect(-9,-e.h/2-6,18,6);
+      // visor
+      ctx.fillStyle='#222'; ctx.fillRect(-10,-4,20,6);
+      ctx.restore();
+    });
+
+    // player
+    ctx.save();
+    ctx.translate(player.x,player.y);
+    ctx.fillStyle='#111'; ctx.fillRect(-player.w/2,-player.h/2,player.w,player.h);
+    ctx.fillStyle='#f23'; ctx.fillRect(-10,-player.h/2+6,20,4);
+    ctx.restore();
+
+    // darkness pass
+    ctx.fillStyle='rgba(0,0,0,0.86)';
+    ctx.fillRect(0,0,W,H);
+    ctx.globalCompositeOperation='destination-out';
+    // torch light
+    if (torch.alive){
+      const grad=ctx.createRadialGradient(torch.x,torch.y-20,0, torch.x,torch.y-20, torch.r);
+      grad.addColorStop(0,'rgba(255,255,255,0.95)');
+      grad.addColorStop(0.6,'rgba(255,255,255,0.6)');
+      grad.addColorStop(1,'rgba(255,255,255,0)');
+      ctx.fillStyle=grad;
+      ctx.beginPath();
+      ctx.arc(torch.x,torch.y-20,torch.r,0,Math.PI*2);
+      ctx.fill();
+    }
+    // player small aura
+    const grad2=ctx.createRadialGradient(player.x,player.y-10,0, player.x,player.y-10, 60);
+    grad2.addColorStop(0,'rgba(255,255,255,0.5)');
+    grad2.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle=grad2;
+    ctx.beginPath();
+    ctx.arc(player.x,player.y-10,60,0,Math.PI*2);
+    ctx.fill();
+    ctx.globalCompositeOperation='source-over';
+
+    // HUD alert
+    ctx.fillStyle='#222'; ctx.fillRect(W/2-205,12,410,16);
+    ctx.fillStyle='#ff3344'; ctx.fillRect(W/2-200,14,4*alert,12);
+    ctx.fillStyle='#ccc'; ctx.font='12px system-ui'; ctx.fillText('Заметность', W/2-200, 42);
+
+    // touch circles
+    ctx.globalAlpha=0.18; ctx.fillStyle='#fff'; ctx.strokeStyle='#aaa'; ctx.lineWidth=2; ctx.globalAlpha=1;
+    btns.forEach(b=>{
+      ctx.globalAlpha=0.18; ctx.beginPath(); ctx.arc(b.cx,b.cy,b.r,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha=1; ctx.beginPath(); ctx.arc(b.cx,b.cy,b.r,0,Math.PI*2); ctx.stroke();
+    });
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
